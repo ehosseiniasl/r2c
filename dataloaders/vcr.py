@@ -16,10 +16,11 @@ from allennlp.nn.util import get_text_field_mask
 from torch.utils.data import Dataset
 from dataloaders.box_utils import load_image, resize_image, to_tensor_and_normalize
 from dataloaders.mask_utils import make_mask
-from dataloaders.bert_field import BertField
+from dataloaders.bert_field import BertField, BertField_reasoning
 import h5py
 from copy import deepcopy
 from config import VCR_IMAGES_DIR, VCR_ANNOTS_DIR
+import ipdb
 
 GENDER_NEUTRAL_NAMES = ['Casey', 'Riley', 'Jessie', 'Jackie', 'Avery', 'Jaime', 'Peyton', 'Kerry', 'Jody', 'Kendall',
                         'Peyton', 'Skyler', 'Frankie', 'Pat', 'Quinn']
@@ -95,6 +96,44 @@ def _fix_tokenization(tokenized_sent, bert_embs, old_det_to_new_ind, obj_to_type
     return text_field, tags
 
 
+def _fix_tokenization_reasoning(tokenized_sent, bert_embs, old_det_to_new_ind, obj_to_type, token_indexers, pad_ind=-1):
+    """
+    Turn a detection list into what we want: some text, as well as some tags.
+    :param tokenized_sent: Tokenized sentence with detections collapsed to a list.
+    :param old_det_to_new_ind: Mapping of the old ID -> new ID (which will be used as the tag)
+    :param obj_to_type: [person, person, pottedplant] indexed by the old labels
+    :return: tokenized sentence
+    """
+
+    new_tokenization_with_tags = []
+    for tok in tokenized_sent:
+        if isinstance(tok, list):
+            for int_name in tok:
+                obj_type = obj_to_type[int_name]
+                new_ind = old_det_to_new_ind[int_name]
+                if new_ind < 0:
+                    raise ValueError("Oh no, the new index is negative! that means it's invalid. {} {}".format(
+                        tokenized_sent, old_det_to_new_ind
+                    ))
+                text_to_use = GENDER_NEUTRAL_NAMES[
+                    new_ind % len(GENDER_NEUTRAL_NAMES)] if obj_type == 'person' else obj_type
+                new_tokenization_with_tags.append((text_to_use, new_ind))
+        else:
+            new_tokenization_with_tags.append((tok, pad_ind))
+    
+    true_length = bert_embs.shape[0]
+    text_field_reasoning = BertField_reasoning([Token(x[0]) for x in new_tokenization_with_tags],
+                           bert_embs,
+                           padding_value=0)
+    text_field = BertField([Token(x[0]) for x in new_tokenization_with_tags],
+                            bert_embs[:len(new_tokenization_with_tags)],
+                           padding_value=0)
+    #tags = SequenceLabelField([x[1] for x in new_tokenization_with_tags], text_field)
+    tags = SequenceLabelField([x[1] for x in new_tokenization_with_tags], text_field)
+    return text_field_reasoning, tags
+
+
+
 class VCR(Dataset):
     def __init__(self, split, mode, only_use_relevant_dets=True, add_image_as_a_box=True, embs_to_load='bert_da',
                  conditioned_answer_choice=0):
@@ -136,8 +175,10 @@ class VCR(Dataset):
         self.coco_objects = ['__background__'] + [x['name'] for k, x in sorted(coco.items(), key=lambda x: int(x[0]))]
         self.coco_obj_to_ind = {o: i for i, o in enumerate(self.coco_objects)}
 
-        self.embs_to_load = embs_to_load
-        self.h5fn = os.path.join(VCR_ANNOTS_DIR, f'{self.embs_to_load}_{self.mode}_{self.split}.h5')
+        #self.embs_to_load = embs_to_load
+        #self.h5fn = os.path.join(VCR_ANNOTS_DIR, f'{self.embs_to_load}_{self.mode}_{self.split}.h5')
+        self.embs_to_load = 'q_predicting_a'
+        self.h5fn = os.path.join(VCR_ANNOTS_DIR, 'activations', f'{self.embs_to_load}_{self.split}.hdf5')
         print("Loading embeddings from {}".format(self.h5fn), flush=True)
 
     @property
@@ -152,8 +193,9 @@ class VCR(Dataset):
             kwargs_copy['mode'] = 'answer'
         train = cls(split='train', **kwargs_copy)
         val = cls(split='val', **kwargs_copy)
-        test = cls(split='test', **kwargs_copy)
-        return train, val, test
+        #test = cls(split='test', **kwargs_copy)
+        #return train, val, test
+        return train, val
 
     @classmethod
     def eval_splits(cls, **kwargs):
@@ -229,14 +271,14 @@ class VCR(Dataset):
         # grp_items = {k: np.array(v, dtype=np.float16) for k, v in self.get_h5_group(index).items()}
         with h5py.File(self.h5fn, 'r') as h5:
             grp_items = {k: np.array(v, dtype=np.float16) for k, v in h5[str(index)].items()}
-
+        
         # Essentially we need to condition on the right answer choice here, if we're doing QA->R. We will always
         # condition on the `conditioned_answer_choice.`
         condition_key = self.conditioned_answer_choice if self.split == "test" and self.mode == "rationale" else ""
 
         instance_dict = {}
         if 'endingonly' not in self.embs_to_load:
-            questions_tokenized, question_tags = zip(*[_fix_tokenization(
+            questions_tokenized, question_tags = zip(*[_fix_tokenization_reasoning(
                 item['question'],
                 grp_items[f'ctx_{self.mode}{condition_key}{i}'],
                 old_det_to_new_ind,
@@ -247,7 +289,7 @@ class VCR(Dataset):
             instance_dict['question'] = ListField(questions_tokenized)
             instance_dict['question_tags'] = ListField(question_tags)
 
-        answers_tokenized, answer_tags = zip(*[_fix_tokenization(
+        answers_tokenized, answer_tags = zip(*[_fix_tokenization_reasoning(
             answer,
             grp_items[f'answer_{self.mode}{condition_key}{i}'],
             old_det_to_new_ind,
