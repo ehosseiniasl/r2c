@@ -121,14 +121,13 @@ def _fix_tokenization_reasoning(tokenized_sent, bert_embs, old_det_to_new_ind, o
         else:
             new_tokenization_with_tags.append((tok, pad_ind))
     
-    true_length = bert_embs.shape[0]
     text_field_reasoning = BertField_reasoning([Token(x[0]) for x in new_tokenization_with_tags],
                            bert_embs,
                            padding_value=0)
     text_field = BertField([Token(x[0]) for x in new_tokenization_with_tags],
                             bert_embs[:len(new_tokenization_with_tags)],
                            padding_value=0)
-    #tags = SequenceLabelField([x[1] for x in new_tokenization_with_tags], text_field)
+    
     tags = SequenceLabelField([x[1] for x in new_tokenization_with_tags], text_field)
     return text_field_reasoning, tags
 
